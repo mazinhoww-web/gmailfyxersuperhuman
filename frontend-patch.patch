@@ -1,0 +1,1271 @@
+From bc31e65de4fff1d67f928bab744d38b53759987c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 23 Mar 2026 12:16:26 +0000
+Subject: [PATCH] =?UTF-8?q?feat:=20integrate=20ARIA=20backend=20API=20?=
+ =?UTF-8?q?=E2=80=94=20replace=20mock=20data=20with=20real=20Gmail=20+=20A?=
+ =?UTF-8?q?I?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Add src/services/ariaApi.ts: typed API client for the FastAPI backend
+- Add src/hooks/useAriaSession.ts: session management after Google OAuth redirect
+- Add src/hooks/useEmails.ts: React Query hooks for all email operations
+- Update EmailList.tsx: real inbox data via useEmailList + useProcessEmails
+- Update DetailPanel.tsx: real email body, AI draft generation, send/archive/snooze
+- Update InboxPage.tsx: Gmail auth gate (useAriaSession)
+- Update .env: add VITE_ARIA_API_URL
+
+https://claude.ai/code/session_01JyeqscqMzUW7eFAvHvUVpS
+---
+ .env                                 |   6 +
+ src/components/inbox/DetailPanel.tsx | 278 ++++++++++++++++++---------
+ src/components/inbox/EmailList.tsx   | 201 +++++++++++--------
+ src/hooks/useAriaSession.ts          |  96 +++++++++
+ src/hooks/useEmails.ts               | 196 +++++++++++++++++++
+ src/pages/InboxPage.tsx              |  53 +++++
+ src/services/ariaApi.ts              | 226 ++++++++++++++++++++++
+ 7 files changed, 878 insertions(+), 178 deletions(-)
+ create mode 100644 src/hooks/useAriaSession.ts
+ create mode 100644 src/hooks/useEmails.ts
+ create mode 100644 src/services/ariaApi.ts
+
+diff --git a/.env b/.env
+index cb4dc80..00fc505 100644
+--- a/.env
++++ b/.env
+@@ -1,3 +1,9 @@
+ VITE_SUPABASE_PROJECT_ID="nbovhhuykcxnxqesosfb"
+ VITE_SUPABASE_PUBLISHABLE_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5ib3ZoaHV5a2N4bnhxZXNvc2ZiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQyNjM5OTQsImV4cCI6MjA4OTgzOTk5NH0.fMcUNw8qOcE7B8fVbp4eCgJJDMIc9jLR2HsprJxSW_Y"
+ VITE_SUPABASE_URL="https://nbovhhuykcxnxqesosfb.supabase.co"
++
++# ARIA Backend URL (FastAPI server)
++# Local development:
++VITE_ARIA_API_URL="http://localhost:8000"
++# Production (Railway/Render - update after deploy):
++# VITE_ARIA_API_URL="https://your-aria-backend.railway.app"
+diff --git a/src/components/inbox/DetailPanel.tsx b/src/components/inbox/DetailPanel.tsx
+index 53c7c51..49a3e89 100644
+--- a/src/components/inbox/DetailPanel.tsx
++++ b/src/components/inbox/DetailPanel.tsx
+@@ -1,3 +1,4 @@
++import { useState } from "react";
+ import { motion } from "framer-motion";
+ import {
+   Archive,
+@@ -9,39 +10,24 @@ import {
+   X,
+   Send,
+   Inbox,
++  Loader2,
+ } from "lucide-react";
++import {
++  useEmail,
++  useGenerateDraft,
++  useSendDraft,
++  useDeleteDraft,
++  useArchiveEmail,
++  useSnoozeEmail,
++  CATEGORY_COLOR_MAP,
++  CATEGORY_LABEL_MAP,
++  extractSenderName,
++} from "@/hooks/useEmails";
+ 
+ interface DetailPanelProps {
+   emailId: string | null;
+ }
+ 
+-const MOCK_DETAIL = {
+-  subject: "Proposta revisada — preciso da sua aprovação",
+-  sender: "Carolina Mendes",
+-  senderEmail: "carolina@empresa.com",
+-  date: "23 Mar 2026, 09:42",
+-  category: "Responder",
+-  catColor: "var(--cat-respond)",
+-  body: `<p>Oi!</p>
+-<p>Segue a versão atualizada da proposta comercial. Fiz as alterações que discutimos na última call:</p>
+-<ul>
+-<li>Ajustei o escopo do módulo de relatórios</li>
+-<li>Incluí a fase de treinamento no timeline</li>
+-<li>Revisei os valores conforme o novo budget</li>
+-</ul>
+-<p>Quando puder dar uma olhada e me dar o ok, agradeço. O cliente precisa de uma resposta até quinta-feira.</p>
+-<p>Abs,<br/>Carolina</p>`,
+-  draft: `Oi Carolina,
+-
+-Revisei a proposta — ficou ótima. Aprovado da minha parte.
+-
+-Só um detalhe: vale confirmar com o Thiago se o timeline do treinamento está alinhado com a disponibilidade da equipe dele.
+-
+-Pode seguir com o envio ao cliente.
+-
+-Abs`,
+-};
+-
+ export function DetailPanel({ emailId }: DetailPanelProps) {
+   if (!emailId) {
+     return (
+@@ -52,13 +38,68 @@ export function DetailPanel({ emailId }: DetailPanelProps) {
+             Selecione um e-mail para ver o conteúdo
+           </p>
+           <p className="text-[11px] text-muted-foreground/25 mt-1.5 font-label">
+-            ou pressione <kbd className="px-1.5 py-0.5 bg-surface rounded text-[10px]">E</kbd> para processar novos e-mails
++            ou clique em <span className="px-1.5 py-0.5 bg-surface rounded text-[10px]">Processar</span> para classificar
+           </p>
+         </div>
+       </div>
+     );
+   }
+ 
++  return <EmailDetailView emailId={emailId} />;
++}
++
++function EmailDetailView({ emailId }: { emailId: string }) {
++  const { data: email, isLoading } = useEmail(emailId);
++  const [draft, setDraft] = useState<{ id: string; content: string } | null>(null);
++
++  const generateDraft = useGenerateDraft();
++  const sendDraft = useSendDraft();
++  const deleteDraft = useDeleteDraft();
++  const archiveEmail = useArchiveEmail();
++  const snoozeEmail = useSnoozeEmail();
++
++  if (isLoading || !email) {
++    return (
++      <div className="flex-1 flex items-center justify-center">
++        <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
++      </div>
++    );
++  }
++
++  const catKey = email.category ?? "";
++  const catColor = CATEGORY_COLOR_MAP[catKey] ?? "var(--cat-fyi)";
++  const catLabel = CATEGORY_LABEL_MAP[catKey] ?? "";
++  const senderName = extractSenderName(email.from);
++  const senderEmail = email.from.match(/<([^>]+)>/)?.[1] ?? email.from;
++
++  const handleGenerateDraft = async () => {
++    const result = await generateDraft.mutateAsync({
++      messageId: email.id,
++      threadId: email.thread_id,
++    });
++    setDraft({ id: result.draft_id, content: result.content });
++  };
++
++  const handleSend = async () => {
++    if (!draft) return;
++    await sendDraft.mutateAsync(draft.id);
++    setDraft(null);
++  };
++
++  const handleDiscard = async () => {
++    if (!draft) return;
++    await deleteDraft.mutateAsync(draft.id);
++    setDraft(null);
++  };
++
++  const handleSnooze = () => {
++    snoozeEmail.mutate({ messageId: email.id, hours: 24 });
++  };
++
++  const handleArchive = () => {
++    archiveEmail.mutate(email.id);
++  };
++
+   return (
+     <motion.div
+       key={emailId}
+@@ -70,53 +111,69 @@ export function DetailPanel({ emailId }: DetailPanelProps) {
+       {/* Header */}
+       <div className="px-6 py-5 border-b border-border-subtle">
+         <h2 className="font-display text-xl text-foreground leading-snug">
+-          {MOCK_DETAIL.subject}
++          {email.subject}
+         </h2>
+         <div className="flex items-center justify-between mt-3">
+           <div className="flex items-center gap-2">
+             <div className="w-8 h-8 rounded-full bg-surface flex items-center justify-center text-xs font-medium text-foreground">
+-              CM
++              {senderName.slice(0, 2).toUpperCase()}
+             </div>
+             <div>
+-              <span className="text-xs text-foreground font-medium">
+-                {MOCK_DETAIL.sender}
+-              </span>
+-              <span className="text-xs text-muted-foreground ml-1.5">
+-                · {MOCK_DETAIL.senderEmail}
+-              </span>
++              <span className="text-xs text-foreground font-medium">{senderName}</span>
++              <span className="text-xs text-muted-foreground ml-1.5">· {senderEmail}</span>
+             </div>
+           </div>
+           <span className="text-[11px] font-label text-muted-foreground/60">
+-            {MOCK_DETAIL.date}
++            {email.date}
+           </span>
+         </div>
+         <div className="flex items-center gap-2 mt-3">
+-          <span
+-            className="text-[10px] font-label px-2 py-0.5 rounded-full"
+-            style={{
+-              backgroundColor: `hsl(${MOCK_DETAIL.catColor} / 0.12)`,
+-              color: `hsl(${MOCK_DETAIL.catColor})`,
+-              boxShadow: `0 0 6px hsl(${MOCK_DETAIL.catColor} / 0.2)`,
+-            }}
+-          >
+-            {MOCK_DETAIL.category}
+-          </span>
++          {catLabel && (
++            <span
++              className="text-[10px] font-label px-2 py-0.5 rounded-full"
++              style={{
++                backgroundColor: `color-mix(in srgb, ${catColor} 12%, transparent)`,
++                color: catColor,
++                boxShadow: `0 0 6px color-mix(in srgb, ${catColor} 20%, transparent)`,
++              }}
++            >
++              {catLabel}
++            </span>
++          )}
+           <div className="flex-1" />
+           <div className="flex items-center gap-1">
+-            {[
+-              { icon: CornerUpLeft, label: "Responder" },
+-              { icon: Archive, label: "Arquivar" },
+-              { icon: Clock, label: "Snooze" },
+-              { icon: Trash2, label: "Lixeira" },
+-            ].map(({ icon: Icon, label }) => (
+-              <button
+-                key={label}
+-                title={label}
+-                className="p-1.5 rounded-md text-muted-foreground hover:bg-surface-hover hover:text-foreground transition-colors active:scale-95"
+-              >
+-                <Icon className="w-3.5 h-3.5" />
+-              </button>
+-            ))}
++            <button
++              onClick={handleGenerateDraft}
++              disabled={generateDraft.isPending}
++              title="Gerar rascunho"
++              className="p-1.5 rounded-md text-muted-foreground hover:bg-surface-hover hover:text-foreground transition-colors active:scale-95 disabled:opacity-50"
++            >
++              {generateDraft.isPending ? (
++                <Loader2 className="w-3.5 h-3.5 animate-spin" />
++              ) : (
++                <CornerUpLeft className="w-3.5 h-3.5" />
++              )}
++            </button>
++            <button
++              onClick={handleArchive}
++              title="Arquivar"
++              className="p-1.5 rounded-md text-muted-foreground hover:bg-surface-hover hover:text-foreground transition-colors active:scale-95"
++            >
++              <Archive className="w-3.5 h-3.5" />
++            </button>
++            <button
++              onClick={handleSnooze}
++              title="Snooze (24h)"
++              className="p-1.5 rounded-md text-muted-foreground hover:bg-surface-hover hover:text-foreground transition-colors active:scale-95"
++            >
++              <Clock className="w-3.5 h-3.5" />
++            </button>
++            <button
++              title="Lixeira"
++              className="p-1.5 rounded-md text-muted-foreground hover:bg-surface-hover hover:text-foreground transition-colors active:scale-95"
++            >
++              <Trash2 className="w-3.5 h-3.5" />
++            </button>
+           </div>
+         </div>
+       </div>
+@@ -125,43 +182,78 @@ export function DetailPanel({ emailId }: DetailPanelProps) {
+       <div
+         className="px-6 py-5 text-sm text-foreground/80 leading-relaxed prose-sm max-w-none
+           [&_p]:mb-3 [&_ul]:mb-3 [&_ul]:pl-5 [&_li]:list-disc [&_li]:text-foreground/70"
+-        dangerouslySetInnerHTML={{ __html: MOCK_DETAIL.body }}
++        dangerouslySetInnerHTML={{ __html: email.body }}
+       />
+ 
+       {/* Draft Panel */}
+-      <motion.div
+-        initial={{ opacity: 0, y: 16 }}
+-        animate={{ opacity: 1, y: 0 }}
+-        transition={{ duration: 0.4, delay: 0.2, ease: [0.16, 1, 0.3, 1] }}
+-        className="mx-6 mb-6 rounded-lg border border-primary/20 bg-primary/[0.04] overflow-hidden"
+-      >
+-        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-primary/10">
+-          <Sparkles className="w-3.5 h-3.5 text-primary" />
+-          <span className="text-xs text-primary font-medium">Rascunho gerado por ARIA</span>
+-          <span className="text-[10px] text-muted-foreground">baseado no seu estilo</span>
+-        </div>
+-        <div className="px-4 py-4">
+-          <pre className="text-sm text-foreground/80 whitespace-pre-wrap font-mono leading-relaxed">
+-            {MOCK_DETAIL.draft}
+-          </pre>
+-        </div>
+-        <div className="flex items-center gap-2 px-4 py-3 border-t border-primary/10 bg-primary/[0.02]">
+-          <button className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-surface-hover transition-colors active:scale-95">
+-            <RotateCcw className="w-3 h-3" />
+-            Regenerar
+-          </button>
+-          <button className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-surface-hover transition-colors active:scale-95">
+-            <X className="w-3 h-3" />
+-            Descartar
+-          </button>
+-          <div className="flex-1" />
+-          <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs bg-primary text-primary-foreground hover:bg-primary/90 transition-colors active:scale-95 font-medium">
+-            <Send className="w-3 h-3" />
+-            Enviar
+-            <kbd className="text-[9px] font-label opacity-70 ml-1">⌘↵</kbd>
++      {draft && (
++        <motion.div
++          initial={{ opacity: 0, y: 16 }}
++          animate={{ opacity: 1, y: 0 }}
++          transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
++          className="mx-6 mb-6 rounded-lg border border-primary/20 bg-primary/[0.04] overflow-hidden"
++        >
++          <div className="flex items-center gap-2 px-4 py-2.5 border-b border-primary/10">
++            <Sparkles className="w-3.5 h-3.5 text-primary" />
++            <span className="text-xs text-primary font-medium">Rascunho gerado por ARIA</span>
++            <span className="text-[10px] text-muted-foreground">baseado no seu estilo</span>
++          </div>
++          <div className="px-4 py-4">
++            <pre className="text-sm text-foreground/80 whitespace-pre-wrap font-mono leading-relaxed">
++              {draft.content}
++            </pre>
++          </div>
++          <div className="flex items-center gap-2 px-4 py-3 border-t border-primary/10 bg-primary/[0.02]">
++            <button
++              onClick={handleGenerateDraft}
++              disabled={generateDraft.isPending}
++              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-surface-hover transition-colors active:scale-95 disabled:opacity-50"
++            >
++              <RotateCcw className="w-3 h-3" />
++              Regenerar
++            </button>
++            <button
++              onClick={handleDiscard}
++              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-surface-hover transition-colors active:scale-95"
++            >
++              <X className="w-3 h-3" />
++              Descartar
++            </button>
++            <div className="flex-1" />
++            <button
++              onClick={handleSend}
++              disabled={sendDraft.isPending}
++              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs bg-primary text-primary-foreground hover:bg-primary/90 transition-colors active:scale-95 font-medium disabled:opacity-50"
++            >
++              {sendDraft.isPending ? (
++                <Loader2 className="w-3 h-3 animate-spin" />
++              ) : (
++                <Send className="w-3 h-3" />
++              )}
++              Enviar
++              <kbd className="text-[9px] font-label opacity-70 ml-1">⌘↵</kbd>
++            </button>
++          </div>
++        </motion.div>
++      )}
++
++      {/* Generate Draft CTA (when no draft exists) */}
++      {!draft && catKey === "to_respond" && (
++        <div className="mx-6 mb-6">
++          <button
++            onClick={handleGenerateDraft}
++            disabled={generateDraft.isPending}
++            className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg border border-dashed border-primary/20 text-sm text-primary/60 hover:border-primary/40 hover:text-primary/80 hover:bg-primary/[0.02] transition-all"
++          >
++            {generateDraft.isPending ? (
++              <Loader2 className="w-4 h-4 animate-spin" />
++            ) : (
++              <Sparkles className="w-4 h-4" />
++            )}
++            {generateDraft.isPending ? "ARIA gerando rascunho..." : "Gerar rascunho com ARIA"}
+           </button>
+         </div>
+-      </motion.div>
++      )}
+     </motion.div>
+   );
+ }
+diff --git a/src/components/inbox/EmailList.tsx b/src/components/inbox/EmailList.tsx
+index c218d08..f6c4e38 100644
+--- a/src/components/inbox/EmailList.tsx
++++ b/src/components/inbox/EmailList.tsx
+@@ -1,28 +1,14 @@
+ import { motion } from "framer-motion";
+-import { RefreshCw, Filter } from "lucide-react";
+-
+-interface EmailRowData {
+-  id: string;
+-  sender: string;
+-  subject: string;
+-  snippet: string;
+-  category: string;
+-  catColor: string;
+-  time: string;
+-  unread: boolean;
+-  hasDraft: boolean;
+-}
+-
+-const MOCK_EMAILS: EmailRowData[] = [
+-  { id: "1", sender: "Carolina Mendes", subject: "Proposta revisada — preciso da sua aprovação", snippet: "Oi! Segue a versão atualizada da proposta. Quando puder revisar...", category: "Responder", catColor: "var(--cat-respond)", time: "10min", unread: true, hasDraft: true },
+-  { id: "2", sender: "André Rocha", subject: "Re: Alinhamento Q2 — datas confirmadas", snippet: "Confirmado: reunião dia 15 às 14h. Vou enviar o invite...", category: "FYI", catColor: "var(--cat-fyi)", time: "32min", unread: true, hasDraft: false },
+-  { id: "3", sender: "Slack", subject: "3 novas mensagens em #produto", snippet: "@marina mencionou você em #produto: 'Sobre o fluxo de...'", category: "Notificação", catColor: "var(--cat-notification)", time: "1h", unread: false, hasDraft: false },
+-  { id: "4", sender: "Google Calendar", subject: "Lembrete: Review semanal amanhã às 10h", snippet: "Review semanal — Participantes: você, Thiago, Marina...", category: "Reunião", catColor: "var(--cat-meeting)", time: "2h", unread: false, hasDraft: false },
+-  { id: "5", sender: "Fernanda Lima", subject: "Comentário no doc de specs do MVP", snippet: "Adicionei um comentário na seção de requisitos técnicos...", category: "Comentário", catColor: "var(--cat-comment)", time: "3h", unread: false, hasDraft: false },
+-  { id: "6", sender: "Thiago Bastos", subject: "Aguardando sua assinatura no contrato", snippet: "O contrato está pronto para assinatura. Prazo até sexta...", category: "Aguardando", catColor: "var(--cat-awaiting)", time: "5h", unread: false, hasDraft: false },
+-  { id: "7", sender: "HubSpot", subject: "Seu relatório mensal está pronto", snippet: "Relatório de março: 234 contatos, 12 deals em progresso...", category: "Marketing", catColor: "var(--cat-marketing)", time: "6h", unread: false, hasDraft: false },
+-  { id: "8", sender: "Marina Souza", subject: "Pode revisar esse wireframe?", snippet: "Acabei o wireframe do novo fluxo de onboarding. Tá no Figma...", category: "Responder", catColor: "var(--cat-respond)", time: "8h", unread: false, hasDraft: true },
+-];
++import { RefreshCw, Filter, Loader2 } from "lucide-react";
++import {
++  useEmailList,
++  useProcessEmails,
++  CATEGORY_COLOR_MAP,
++  CATEGORY_LABEL_MAP,
++  formatEmailDate,
++  extractSenderName,
++} from "@/hooks/useEmails";
++import type { Email } from "@/services/ariaApi";
+ 
+ interface EmailListProps {
+   selectedId: string | null;
+@@ -30,8 +16,12 @@ interface EmailListProps {
+ }
+ 
+ export function EmailList({ selectedId, onSelect }: EmailListProps) {
+-  const unread = MOCK_EMAILS.filter(e => e.unread);
+-  const read = MOCK_EMAILS.filter(e => !e.unread);
++  const { data, isLoading, isError } = useEmailList("inbox");
++  const processEmails = useProcessEmails();
++
++  const emails = data?.emails ?? [];
++  const unread = emails.filter((e) => e.is_unread);
++  const read = emails.filter((e) => !e.is_unread);
+ 
+   return (
+     <div className="w-[380px] h-screen border-r border-border flex flex-col shrink-0 bg-background">
+@@ -42,8 +32,16 @@ export function EmailList({ selectedId, onSelect }: EmailListProps) {
+           <button className="p-1.5 rounded-md text-muted-foreground hover:bg-surface-hover hover:text-foreground transition-colors active:scale-95">
+             <Filter className="w-3.5 h-3.5" />
+           </button>
+-          <button className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs text-primary bg-primary/10 hover:bg-primary/15 transition-colors active:scale-95">
+-            <RefreshCw className="w-3 h-3" />
++          <button
++            onClick={() => processEmails.mutate({})}
++            disabled={processEmails.isPending}
++            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs text-primary bg-primary/10 hover:bg-primary/15 transition-colors active:scale-95 disabled:opacity-50"
++          >
++            {processEmails.isPending ? (
++              <Loader2 className="w-3 h-3 animate-spin" />
++            ) : (
++              <RefreshCw className="w-3 h-3" />
++            )}
+             Processar
+           </button>
+         </div>
+@@ -51,50 +49,78 @@ export function EmailList({ selectedId, onSelect }: EmailListProps) {
+ 
+       {/* Email sections */}
+       <div className="flex-1 overflow-y-auto">
+-        {/* Unread */}
+-        {unread.length > 0 && (
+-          <div>
+-            <div className="px-4 py-2">
+-              <span className="text-[10px] font-label text-muted-foreground/60 uppercase tracking-wider">
+-                Não lidos · {unread.length}
+-              </span>
+-            </div>
+-            <motion.div
+-              initial="hidden"
+-              animate="show"
+-              variants={{
+-                hidden: { opacity: 0 },
+-                show: { opacity: 1, transition: { staggerChildren: 0.05 } },
+-              }}
+-            >
+-              {unread.map((email) => (
+-                <EmailRow
+-                  key={email.id}
+-                  email={email}
+-                  selected={selectedId === email.id}
+-                  onSelect={onSelect}
+-                />
+-              ))}
+-            </motion.div>
++        {isLoading && (
++          <div className="flex items-center justify-center py-12">
++            <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+           </div>
+         )}
+ 
+-        {/* Read */}
+-        <div>
+-          <div className="px-4 py-2 mt-2">
+-            <span className="text-[10px] font-label text-muted-foreground/60 uppercase tracking-wider">
+-              Tudo mais
+-            </span>
++        {isError && (
++          <div className="px-4 py-6 text-center">
++            <p className="text-sm text-muted-foreground">
++              Erro ao carregar e-mails.
++            </p>
+           </div>
+-          {read.map((email) => (
+-            <EmailRow
+-              key={email.id}
+-              email={email}
+-              selected={selectedId === email.id}
+-              onSelect={onSelect}
+-            />
+-          ))}
+-        </div>
++        )}
++
++        {!isLoading && !isError && (
++          <>
++            {/* Unread */}
++            {unread.length > 0 && (
++              <div>
++                <div className="px-4 py-2">
++                  <span className="text-[10px] font-label text-muted-foreground/60 uppercase tracking-wider">
++                    Não lidos · {unread.length}
++                  </span>
++                </div>
++                <motion.div
++                  initial="hidden"
++                  animate="show"
++                  variants={{
++                    hidden: { opacity: 0 },
++                    show: { opacity: 1, transition: { staggerChildren: 0.05 } },
++                  }}
++                >
++                  {unread.map((email) => (
++                    <EmailRow
++                      key={email.id}
++                      email={email}
++                      selected={selectedId === email.id}
++                      onSelect={onSelect}
++                    />
++                  ))}
++                </motion.div>
++              </div>
++            )}
++
++            {/* Read */}
++            {read.length > 0 && (
++              <div>
++                <div className="px-4 py-2 mt-2">
++                  <span className="text-[10px] font-label text-muted-foreground/60 uppercase tracking-wider">
++                    Tudo mais
++                  </span>
++                </div>
++                {read.map((email) => (
++                  <EmailRow
++                    key={email.id}
++                    email={email}
++                    selected={selectedId === email.id}
++                    onSelect={onSelect}
++                  />
++                ))}
++              </div>
++            )}
++
++            {emails.length === 0 && (
++              <div className="px-4 py-12 text-center">
++                <p className="text-sm text-muted-foreground">
++                  Inbox vazia — clique em Processar para classificar seus e-mails.
++                </p>
++              </div>
++            )}
++          </>
++        )}
+       </div>
+     </div>
+   );
+@@ -105,10 +131,16 @@ function EmailRow({
+   selected,
+   onSelect,
+ }: {
+-  email: EmailRowData;
++  email: Email;
+   selected: boolean;
+   onSelect: (id: string) => void;
+ }) {
++  const catKey = email.category ?? "";
++  const catColor = CATEGORY_COLOR_MAP[catKey] ?? "var(--cat-fyi)";
++  const catLabel = CATEGORY_LABEL_MAP[catKey] ?? "";
++  const senderName = extractSenderName(email.from);
++  const time = formatEmailDate(email.date);
++
+   return (
+     <motion.button
+       variants={{
+@@ -122,11 +154,11 @@ function EmailRow({
+           ? "bg-surface border-l-2"
+           : "hover:bg-surface-hover border-l-2 border-l-transparent"
+       }`}
+-      style={selected ? { borderLeftColor: `hsl(${email.catColor})` } : undefined}
++      style={selected ? { borderLeftColor: catColor } : undefined}
+     >
+       {/* Unread dot */}
+       <div className="pt-1.5 shrink-0">
+-        {email.unread ? (
++        {email.is_unread ? (
+           <div className="w-2 h-2 rounded-full bg-primary" />
+         ) : (
+           <div className="w-2 h-2 rounded-full bg-transparent" />
+@@ -138,24 +170,23 @@ function EmailRow({
+         <div className="flex items-center justify-between gap-2">
+           <span
+             className={`text-xs truncate ${
+-              email.unread ? "text-foreground font-semibold" : "text-foreground/80"
++              email.is_unread ? "text-foreground font-semibold" : "text-foreground/80"
+             }`}
+           >
+-            {email.sender}
++            {senderName}
+           </span>
+           <div className="flex items-center gap-1.5 shrink-0">
+-            {email.hasDraft && (
+-              <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse-glow" />
++            {catLabel && (
++              <span
++                className="text-[9px] font-label px-1.5 py-0.5 rounded-full"
++                style={{
++                  backgroundColor: `color-mix(in srgb, ${catColor} 12%, transparent)`,
++                  color: catColor,
++                }}
++              >
++                {catLabel}
++              </span>
+             )}
+-            <span
+-              className="text-[9px] font-label px-1.5 py-0.5 rounded-full"
+-              style={{
+-                backgroundColor: `hsl(${email.catColor} / 0.12)`,
+-                color: `hsl(${email.catColor})`,
+-              }}
+-            >
+-              {email.category}
+-            </span>
+           </div>
+         </div>
+         <p className="text-[11px] text-foreground/70 truncate mt-0.5">{email.subject}</p>
+@@ -164,7 +195,7 @@ function EmailRow({
+ 
+       {/* Time */}
+       <span className="text-[10px] font-label text-muted-foreground/50 shrink-0 pt-0.5">
+-        {email.time}
++        {time}
+       </span>
+     </motion.button>
+   );
+diff --git a/src/hooks/useAriaSession.ts b/src/hooks/useAriaSession.ts
+new file mode 100644
+index 0000000..d506c7f
+--- /dev/null
++++ b/src/hooks/useAriaSession.ts
+@@ -0,0 +1,96 @@
++/**
++ * Hook to manage the ARIA backend session.
++ * Parses the session token from URL params after Google OAuth redirect,
++ * and provides the current user info.
++ */
++
++import { useEffect, useState, useCallback } from "react";
++import { useSearchParams, useNavigate } from "react-router-dom";
++import {
++  getSession,
++  setSession,
++  clearSession,
++  getAriaUser,
++  startGmailAuth,
++  logout as apiLogout,
++} from "@/services/ariaApi";
++
++export interface AriaUser {
++  user_id: string;
++  email: string;
++  name: string;
++  picture: string;
++}
++
++interface AriaSessionState {
++  session: string | null;
++  user: AriaUser | null;
++  isLoading: boolean;
++  isAuthenticated: boolean;
++  connectGmail: (supabaseUserId?: string) => void;
++  logout: () => Promise<void>;
++}
++
++export function useAriaSession(): AriaSessionState {
++  const [searchParams, setSearchParams] = useSearchParams();
++  const navigate = useNavigate();
++  const [session, setSessionState] = useState<string | null>(getSession);
++  const [user, setUser] = useState<AriaUser | null>(null);
++  const [isLoading, setIsLoading] = useState(!!getSession());
++
++  // On mount: capture session from URL if redirected from OAuth
++  useEffect(() => {
++    const urlSession = searchParams.get("session");
++    const urlEmail = searchParams.get("email");
++    const urlName = searchParams.get("name");
++    const urlPicture = searchParams.get("picture");
++
++    if (urlSession) {
++      setSession(urlSession);
++      setSessionState(urlSession);
++
++      if (urlEmail && urlName) {
++        setUser({ user_id: "", email: urlEmail, name: urlName, picture: urlPicture || "" });
++      }
++
++      // Clean URL params
++      setSearchParams({});
++    }
++  }, []);
++
++  // Load user info when session exists
++  useEffect(() => {
++    if (!session) {
++      setIsLoading(false);
++      return;
++    }
++    setIsLoading(true);
++    getAriaUser()
++      .then((u) => setUser(u))
++      .catch(() => {
++        clearSession();
++        setSessionState(null);
++      })
++      .finally(() => setIsLoading(false));
++  }, [session]);
++
++  const connectGmail = useCallback((supabaseUserId?: string) => {
++    startGmailAuth(supabaseUserId);
++  }, []);
++
++  const logout = useCallback(async () => {
++    await apiLogout();
++    setSessionState(null);
++    setUser(null);
++    navigate("/");
++  }, [navigate]);
++
++  return {
++    session,
++    user,
++    isLoading,
++    isAuthenticated: !!session && !!user,
++    connectGmail,
++    logout,
++  };
++}
+diff --git a/src/hooks/useEmails.ts b/src/hooks/useEmails.ts
+new file mode 100644
+index 0000000..1d867db
+--- /dev/null
++++ b/src/hooks/useEmails.ts
+@@ -0,0 +1,196 @@
++/**
++ * Hooks for email data fetching and mutations using React Query.
++ */
++
++import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
++import {
++  listEmails,
++  getEmail,
++  getThread,
++  archiveEmail,
++  processEmails,
++  generateDraft,
++  sendDraft,
++  deleteDraft,
++  getCategories,
++  snoozeEmail,
++  type Email,
++} from "@/services/ariaApi";
++import { getSession } from "@/services/ariaApi";
++import { toast } from "sonner";
++
++// ─── Query Keys ───────────────────────────────────────────────────────────────
++
++export const emailKeys = {
++  all: ["emails"] as const,
++  list: (folder: string) => ["emails", "list", folder] as const,
++  detail: (id: string) => ["emails", "detail", id] as const,
++  thread: (id: string) => ["emails", "thread", id] as const,
++  categories: ["emails", "categories"] as const,
++};
++
++// ─── Queries ──────────────────────────────────────────────────────────────────
++
++export function useEmailList(folder: "inbox" | "unread" | "sent" = "inbox") {
++  const session = getSession();
++  return useQuery({
++    queryKey: emailKeys.list(folder),
++    queryFn: () => listEmails(folder),
++    enabled: !!session,
++    staleTime: 30_000,
++    refetchInterval: 60_000,
++  });
++}
++
++export function useEmail(messageId: string | null) {
++  const session = getSession();
++  return useQuery({
++    queryKey: emailKeys.detail(messageId!),
++    queryFn: () => getEmail(messageId!),
++    enabled: !!session && !!messageId,
++    staleTime: 60_000,
++  });
++}
++
++export function useEmailThread(messageId: string | null) {
++  const session = getSession();
++  return useQuery({
++    queryKey: emailKeys.thread(messageId!),
++    queryFn: () => getThread(messageId!),
++    enabled: !!session && !!messageId,
++    staleTime: 120_000,
++  });
++}
++
++export function useCategories() {
++  const session = getSession();
++  return useQuery({
++    queryKey: emailKeys.categories,
++    queryFn: getCategories,
++    enabled: !!session,
++    staleTime: 300_000,
++  });
++}
++
++// ─── Mutations ────────────────────────────────────────────────────────────────
++
++export function useArchiveEmail() {
++  const qc = useQueryClient();
++  return useMutation({
++    mutationFn: (messageId: string) => archiveEmail(messageId),
++    onSuccess: (_, messageId) => {
++      qc.invalidateQueries({ queryKey: emailKeys.all });
++      toast.success("E-mail arquivado");
++    },
++    onError: () => toast.error("Erro ao arquivar"),
++  });
++}
++
++export function useProcessEmails() {
++  const qc = useQueryClient();
++  return useMutation({
++    mutationFn: ({ maxEmails = 50, dryRun = false } = {}) =>
++      processEmails(maxEmails, dryRun),
++    onSuccess: (result) => {
++      qc.invalidateQueries({ queryKey: emailKeys.all });
++      toast.success(
++        `Processado: ${result.processed} e-mails · ${result.drafts_created} rascunhos gerados`
++      );
++    },
++    onError: () => toast.error("Erro ao processar e-mails"),
++  });
++}
++
++export function useGenerateDraft() {
++  return useMutation({
++    mutationFn: ({
++      messageId,
++      threadId,
++    }: {
++      messageId: string;
++      threadId?: string;
++    }) => generateDraft(messageId, threadId),
++    onSuccess: () => toast.success("Rascunho gerado por ARIA"),
++    onError: () => toast.error("Erro ao gerar rascunho"),
++  });
++}
++
++export function useSendDraft() {
++  const qc = useQueryClient();
++  return useMutation({
++    mutationFn: (draftId: string) => sendDraft(draftId),
++    onSuccess: () => {
++      qc.invalidateQueries({ queryKey: emailKeys.all });
++      toast.success("E-mail enviado!");
++    },
++    onError: () => toast.error("Erro ao enviar"),
++  });
++}
++
++export function useDeleteDraft() {
++  return useMutation({
++    mutationFn: (draftId: string) => deleteDraft(draftId),
++    onSuccess: () => toast.success("Rascunho descartado"),
++    onError: () => toast.error("Erro ao descartar"),
++  });
++}
++
++export function useSnoozeEmail() {
++  const qc = useQueryClient();
++  return useMutation({
++    mutationFn: ({ messageId, hours = 24 }: { messageId: string; hours?: number }) => {
++      const until = new Date(Date.now() + hours * 3_600_000);
++      return snoozeEmail(messageId, until);
++    },
++    onSuccess: () => {
++      qc.invalidateQueries({ queryKey: emailKeys.all });
++      toast.success("E-mail adiado");
++    },
++    onError: () => toast.error("Erro ao adiar"),
++  });
++}
++
++// ─── Helpers ──────────────────────────────────────────────────────────────────
++
++export const CATEGORY_COLOR_MAP: Record<string, string> = {
++  to_respond: "var(--cat-respond)",
++  fyi: "var(--cat-fyi)",
++  comment: "var(--cat-comment)",
++  notification: "var(--cat-notification)",
++  meeting_update: "var(--cat-meeting)",
++  awaiting_reply: "var(--cat-awaiting)",
++  actioned: "var(--cat-actioned)",
++  marketing: "var(--cat-marketing)",
++};
++
++export const CATEGORY_LABEL_MAP: Record<string, string> = {
++  to_respond: "Responder",
++  fyi: "FYI",
++  comment: "Comentário",
++  notification: "Notificação",
++  meeting_update: "Reunião",
++  awaiting_reply: "Aguardando",
++  actioned: "Acionado",
++  marketing: "Marketing",
++};
++
++export function formatEmailDate(dateStr: string): string {
++  if (!dateStr) return "";
++  try {
++    const d = new Date(dateStr);
++    const now = new Date();
++    const diffMs = now.getTime() - d.getTime();
++    const diffMin = Math.floor(diffMs / 60_000);
++    if (diffMin < 60) return `${diffMin}min`;
++    const diffH = Math.floor(diffMin / 60);
++    if (diffH < 24) return `${diffH}h`;
++    return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "short" });
++  } catch {
++    return dateStr;
++  }
++}
++
++export function extractSenderName(from: string): string {
++  const match = from.match(/^"?([^"<]+)"?\s*</);
++  return match ? match[1].trim() : from.split("@")[0];
++}
+diff --git a/src/pages/InboxPage.tsx b/src/pages/InboxPage.tsx
+index d5d8627..0ba7d0e 100644
+--- a/src/pages/InboxPage.tsx
++++ b/src/pages/InboxPage.tsx
+@@ -2,9 +2,62 @@ import { useState } from "react";
+ import { AppSidebar } from "@/components/inbox/AppSidebar";
+ import { EmailList } from "@/components/inbox/EmailList";
+ import { DetailPanel } from "@/components/inbox/DetailPanel";
++import { useAriaSession } from "@/hooks/useAriaSession";
++import { motion } from "framer-motion";
++
++function GmailConnectGate({ onConnect }: { onConnect: () => void }) {
++  return (
++    <div className="grain flex h-screen bg-background items-center justify-center">
++      <motion.div
++        initial={{ opacity: 0, y: 16 }}
++        animate={{ opacity: 1, y: 0 }}
++        transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
++        className="flex flex-col items-center text-center gap-6 max-w-sm"
++      >
++        <h2 className="font-display text-3xl text-foreground">
++          Conecte seu Gmail
++        </h2>
++        <p className="text-sm text-muted-foreground leading-relaxed">
++          Para que a ARIA possa ler, classificar e rascunhar seus e-mails,
++          precisamos de acesso ao seu Gmail.
++        </p>
++        <button
++          onClick={onConnect}
++          className="inline-flex items-center gap-3 px-6 py-3 rounded-lg bg-foreground text-background font-mono text-sm font-medium transition-all hover:shadow-lg hover:shadow-primary/10 active:scale-[0.97]"
++        >
++          <svg className="w-5 h-5" viewBox="0 0 24 24">
++            <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" />
++            <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
++            <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
++            <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
++          </svg>
++          Autorizar acesso ao Gmail
++        </button>
++        <p className="text-[11px] text-muted-foreground/50 font-label">
++          Usamos apenas para leitura e rascunhos. Nunca enviamos sem sua confirmação.
++        </p>
++      </motion.div>
++    </div>
++  );
++}
+ 
+ export default function InboxPage() {
+   const [selectedEmailId, setSelectedEmailId] = useState<string | null>(null);
++  const { isAuthenticated, isLoading, connectGmail } = useAriaSession();
++
++  if (isLoading) {
++    return (
++      <div className="grain flex h-screen bg-background items-center justify-center">
++        <div className="text-sm text-muted-foreground font-label animate-pulse">
++          Carregando ARIA...
++        </div>
++      </div>
++    );
++  }
++
++  if (!isAuthenticated) {
++    return <GmailConnectGate onConnect={() => connectGmail()} />;
++  }
+ 
+   return (
+     <div className="grain flex h-screen bg-background overflow-hidden">
+diff --git a/src/services/ariaApi.ts b/src/services/ariaApi.ts
+new file mode 100644
+index 0000000..bc868df
+--- /dev/null
++++ b/src/services/ariaApi.ts
+@@ -0,0 +1,226 @@
++/**
++ * ARIA Backend API Client
++ * Connects the Lovable frontend to the FastAPI/Python backend.
++ */
++
++const ARIA_API_URL = import.meta.env.VITE_ARIA_API_URL || "http://localhost:8000";
++
++// ─── Session Management ───────────────────────────────────────────────────────
++
++const SESSION_KEY = "aria_session";
++
++export function getSession(): string | null {
++  return localStorage.getItem(SESSION_KEY);
++}
++
++export function setSession(token: string): void {
++  localStorage.setItem(SESSION_KEY, token);
++}
++
++export function clearSession(): void {
++  localStorage.removeItem(SESSION_KEY);
++}
++
++// ─── HTTP Helper ──────────────────────────────────────────────────────────────
++
++async function request<T>(
++  path: string,
++  options: RequestInit & { params?: Record<string, string | number | boolean | undefined> } = {}
++): Promise<T> {
++  const session = getSession();
++  const { params, ...fetchOptions } = options;
++
++  const url = new URL(`${ARIA_API_URL}${path}`);
++  if (session) url.searchParams.set("session", session);
++  if (params) {
++    Object.entries(params).forEach(([k, v]) => {
++      if (v !== undefined) url.searchParams.set(k, String(v));
++    });
++  }
++
++  const res = await fetch(url.toString(), {
++    ...fetchOptions,
++    credentials: "include",
++    headers: {
++      "Content-Type": "application/json",
++      ...fetchOptions.headers,
++    },
++  });
++
++  if (!res.ok) {
++    const err = await res.json().catch(() => ({ detail: res.statusText }));
++    throw new Error(err.detail || `API error ${res.status}`);
++  }
++
++  return res.json();
++}
++
++// ─── Auth ─────────────────────────────────────────────────────────────────────
++
++/** Redirect user to the backend's Google OAuth (with Gmail scopes). */
++export function startGmailAuth(supabaseUserId?: string): void {
++  const url = new URL(`${ARIA_API_URL}/auth/google`);
++  if (supabaseUserId) url.searchParams.set("user_id", supabaseUserId);
++  window.location.href = url.toString();
++}
++
++export async function getAriaUser(): Promise<{
++  user_id: string;
++  email: string;
++  name: string;
++  picture: string;
++  authenticated: boolean;
++}> {
++  return request("/auth/me");
++}
++
++export async function logout(): Promise<void> {
++  const session = getSession();
++  if (session) {
++    await request("/auth/logout", {
++      method: "POST",
++      params: { session },
++    }).catch(() => {});
++  }
++  clearSession();
++}
++
++// ─── Emails ───────────────────────────────────────────────────────────────────
++
++export interface Email {
++  id: string;
++  thread_id: string;
++  subject: string;
++  from: string;
++  to: string;
++  date: string;
++  snippet: string;
++  is_unread: boolean;
++  label_ids: string[];
++  category: string | null;
++}
++
++export interface EmailDetail extends Email {
++  body: string;
++}
++
++export async function listEmails(
++  folder: "inbox" | "unread" | "sent" = "inbox",
++  maxResults = 50
++): Promise<{ emails: Email[]; total: number }> {
++  return request("/emails", { params: { folder, max_results: maxResults } });
++}
++
++export async function getEmail(messageId: string): Promise<EmailDetail> {
++  return request(`/emails/${messageId}`);
++}
++
++export async function getThread(messageId: string): Promise<{
++  thread_id: string;
++  summary: string;
++  messages: Array<{ id: string; from: string; date: string; body: string }>;
++}> {
++  return request(`/emails/${messageId}/thread`);
++}
++
++export async function classifyEmail(messageId: string): Promise<{ category: string }> {
++  return request(`/emails/${messageId}/classify`, { method: "POST" });
++}
++
++export async function archiveEmail(messageId: string): Promise<{ success: boolean }> {
++  return request(`/emails/${messageId}/archive`, { method: "POST" });
++}
++
++export async function processEmails(
++  maxEmails = 50,
++  dryRun = false
++): Promise<{
++  processed: number;
++  categories: Record<string, number>;
++  drafts_created: number;
++  errors: number;
++  dry_run: boolean;
++}> {
++  return request("/emails/process", {
++    method: "POST",
++    params: { max_emails: maxEmails, dry_run: dryRun },
++  });
++}
++
++// ─── Drafts ───────────────────────────────────────────────────────────────────
++
++export interface Draft {
++  draft_id: string;
++  content: string;
++  message_id?: string;
++}
++
++export async function generateDraft(
++  messageId: string,
++  threadId?: string
++): Promise<Draft> {
++  return request("/drafts/generate", {
++    method: "POST",
++    body: JSON.stringify({ message_id: messageId, thread_id: threadId }),
++  });
++}
++
++export async function sendDraft(draftId: string): Promise<{ success: boolean }> {
++  return request(`/drafts/${draftId}/send`, { method: "POST" });
++}
++
++export async function deleteDraft(draftId: string): Promise<{ success: boolean }> {
++  return request(`/drafts/${draftId}`, { method: "DELETE" });
++}
++
++// ─── Labels / Categories ──────────────────────────────────────────────────────
++
++export interface Category {
++  key: string;
++  name: string;
++  label_id: string | null;
++  color: string;
++  count: number;
++}
++
++export async function getCategories(): Promise<{ categories: Category[] }> {
++  return request("/labels/categories");
++}
++
++export async function setupLabels(): Promise<{
++  created: string[];
++  existing: string[];
++  total: number;
++}> {
++  return request("/labels/setup", { method: "POST" });
++}
++
++// ─── Snooze ───────────────────────────────────────────────────────────────────
++
++export async function snoozeEmail(
++  messageId: string,
++  snoozeUntil: Date
++): Promise<{ success: boolean }> {
++  return request("/snooze", {
++    method: "POST",
++    body: JSON.stringify({
++      message_id: messageId,
++      snooze_until: snoozeUntil.toISOString(),
++    }),
++  });
++}
++
++export async function cancelSnooze(messageId: string): Promise<{ success: boolean }> {
++  return request(`/snooze/${messageId}`, { method: "DELETE" });
++}
++
++// ─── Health ───────────────────────────────────────────────────────────────────
++
++export async function checkHealth(): Promise<boolean> {
++  try {
++    await fetch(`${ARIA_API_URL}/health`);
++    return true;
++  } catch {
++    return false;
++  }
++}
+-- 
+2.43.0
+
