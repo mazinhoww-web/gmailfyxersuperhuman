@@ -1,0 +1,22 @@
+# Gmail AI Assistant — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Google API
+google-auth>=2.28.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+google-api-python-client>=2.120.0
+
+# Anthropic / Claude
+anthropic>=0.28.0
+
+# Configuration
+pyyaml>=6.0.1
+python-dotenv>=1.0.1
+
+# CLI & Terminal UI
+click>=8.1.7
+rich>=13.7.1
+
+# Scheduling (for cron-like polling)
+schedule>=1.2.1

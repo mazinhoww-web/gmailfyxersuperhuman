@@ -1,0 +1,70 @@
+# Email Snippets — Quick Reply Templates
+# ─────────────────────────────────────────────────────────────────────────────
+# Usage in CLI: type /trigger and it expands to the template text
+# Placeholders in [CAPS] must be filled before sending
+# ─────────────────────────────────────────────────────────────────────────────
+
+snippets:
+  - trigger: "/ok"
+    description: "Simple approval"
+    text: "Perfeito, pode prosseguir."
+
+  - trigger: "/ok-en"
+    description: "Simple approval (English)"
+    text: "Sounds good, please proceed."
+
+  - trigger: "/call"
+    description: "Ask to call on WhatsApp"
+    text: "Podemos falar? Me chame no WhatsApp quando quiser."
+
+  - trigger: "/call-en"
+    description: "Ask to call (English)"
+    text: "Would love to connect. Feel free to reach out when you're available."
+
+  - trigger: "/slot"
+    description: "Offer meeting time slots"
+    text: "Disponível [DIA] às [HORA] ou [DIA2] às [HORA2]. Confirma?"
+
+  - trigger: "/slot-en"
+    description: "Offer meeting time slots (English)"
+    text: "I'm available on [DAY] at [TIME] or [DAY2] at [TIME2]. Does either work for you?"
+
+  - trigger: "/later"
+    description: "Defer/snooze response"
+    text: "Recebi! Vou analisar com calma e te retorno em breve."
+
+  - trigger: "/later-en"
+    description: "Defer response (English)"
+    text: "Got it — I'll review this carefully and get back to you shortly."
+
+  - trigger: "/intro"
+    description: "Introduction / nice to meet"
+    text: "Olá [NOME], obrigado por entrar em contato! Fico feliz em conectar."
+
+  - trigger: "/intro-en"
+    description: "Introduction (English)"
+    text: "Hi [NAME], thanks for reaching out! Happy to connect."
+
+  - trigger: "/docs"
+    description: "Request more information/docs"
+    text: "Poderia compartilhar mais detalhes ou documentação sobre [ASSUNTO]?"
+
+  - trigger: "/decline"
+    description: "Politely decline"
+    text: "Agradeço a oportunidade, mas no momento não será possível avançar nessa direção."
+
+  - trigger: "/decline-en"
+    description: "Politely decline (English)"
+    text: "Thank you for thinking of me, but I'm not able to move forward with this at this time."
+
+  - trigger: "/followup"
+    description: "Gentle follow-up"
+    text: "Olá! Passando para verificar se teve chance de analisar meu e-mail anterior sobre [ASSUNTO]."
+
+  - trigger: "/followup-en"
+    description: "Gentle follow-up (English)"
+    text: "Hi, just following up on my previous email about [TOPIC]. Let me know if you need anything."
+
+  - trigger: "/ooo"
+    description: "Out of office"
+    text: "Estou fora do escritório até [DATA] com acesso limitado a e-mails. Responderei assim que possível."

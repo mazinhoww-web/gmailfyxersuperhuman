@@ -1,0 +1,78 @@
+# Gmail AI Assistant Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# IMPORTANT: After first run, label IDs will be auto-populated by gmail/labels.py
+# Run: python main.py --setup-labels  to fetch real IDs from your Gmail account
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Claude model to use for classification and draft generation
+claude:
+  model: "claude-sonnet-4-20250514"
+  max_tokens_classification: 100
+  max_tokens_draft: 1000
+  max_tokens_summary: 200
+
+# Gmail label name → ID mapping
+# These IDs will be auto-populated on first run via --setup-labels
+# Format: internal_key: gmail_label_id
+labels:
+  to_respond: ""       # "to respond" label — stays in inbox
+  fyi: ""              # "FYI" label — stays in inbox
+  comment: ""          # "comment" label — archived
+  notification: ""     # "notification" label — archived
+  meeting_update: ""   # "meeting update" label — archived
+  awaiting_reply: ""   # "awaiting reply" label — archived
+  actioned: ""         # "actioned" label — archived
+  marketing: ""        # "marketing" label — archived
+
+# Processing behavior
+processing:
+  # Categories removed from inbox after labeling
+  move_out_of_inbox:
+    - comment
+    - notification
+    - meeting_update
+    - awaiting_reply
+    - actioned
+    - marketing
+
+  # Categories kept in inbox
+  keep_in_inbox:
+    - to_respond
+    - fyi
+
+  # Batch processing settings
+  batch_size: 100
+  max_unread_per_run: 50
+  rate_limit_sleep_between_batches: 1  # seconds
+
+# Draft generation settings
+drafts:
+  auto_generate_for_to_respond: true
+  style_sample_size: 300      # Number of sent emails to analyze for style
+  max_draft_body_chars: 3000  # Max email body chars to pass to Claude
+  never_send_automatically: true  # SAFETY: always require manual send
+
+# Follow-up tracker
+follow_up:
+  check_after_days: 3         # Flag awaiting_reply threads older than N days
+  auto_create_drafts: false   # Set true to auto-create follow-up draft suggestions
+
+# Snooze settings
+snooze:
+  default_hours: 24
+  check_interval_seconds: 60  # How often to check for due snoozes
+
+# Undo send
+undo_send:
+  window_seconds: 10
+
+# Model Armor (prompt injection protection)
+model_armor:
+  enabled: true
+  mode: "warn"    # "warn" (flag but pass) or "block" (reject flagged content)
+  template_id: ""  # Set via GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE env var
+
+# Logging
+logging:
+  level: "INFO"   # DEBUG, INFO, WARNING, ERROR
+  log_to_file: true

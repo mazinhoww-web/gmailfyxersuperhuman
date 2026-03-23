@@ -1,0 +1,27 @@
+# Secrets — NEVER commit these
+.env
+auth/credentials.json
+auth/token.pickle
+
+# Data files
+data/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
